@@ -128,7 +128,7 @@ class Beds24Client:
     # ---- エンドポイント ----
 
     def properties(self):
-        return self.get_all("/properties", {"includeAllRooms": "true"})
+        return self.get_all("/properties", {"includeAllRooms": "true", "includeUnitDetails": "true"})
 
     def bookings(self, property_ids=None, departure_from=None, statuses=ALL_BOOKING_STATUSES, booking_ids=None):
         params = {}

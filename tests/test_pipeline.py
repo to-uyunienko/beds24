@@ -26,6 +26,8 @@ def day(days_from_today):
 PROPERTIES = [
     {"id": 1, "name": "Sample House", "roomTypes": [{"id": 11, "name": "201"}, {"id": 12, "name": "301"}]},
     {"id": 2, "name": "Other House", "roomTypes": [{"id": 21, "name": "Room A"}]},
+    {"id": 3, "name": "Unit House", "groupKeywords": ["テスト合同会社"],
+     "roomTypes": [{"id": 31, "name": "1ベッドルーム", "qty": 2, "units": [{"id": 1, "name": "501"}, {"id": 2, "name": "502"}]}]},
 ]
 BOOKINGS = [
     {"id": 100, "propertyId": 1, "roomId": 11, "status": "confirmed", "arrival": day(-10), "departure": day(-7),
@@ -34,6 +36,7 @@ BOOKINGS = [
      "numAdult": 3, "numChild": 1, "channel": "booking"},
     {"id": 102, "propertyId": 1, "roomId": 12, "status": "confirmed", "arrival": day(-120), "departure": day(-118)},
     {"id": 200, "propertyId": 2, "roomId": 21, "status": "confirmed", "arrival": day(-3), "departure": day(-1)},
+    {"id": 300, "propertyId": 3, "roomId": 31, "unitId": 2, "status": "confirmed", "arrival": day(1), "departure": day(3)},
 ]
 MESSAGES = [
     {"id": 1, "bookingId": 100, "source": "guest", "time": iso(12), "message": "Can we leave our luggage before check-in?"},
@@ -46,6 +49,7 @@ MESSAGES = [
     {"id": 8, "bookingId": 200, "source": "guest", "time": iso(2), "message": "other property"},
     {"id": 9, "bookingId": 101, "source": "host", "time": iso(1), "message": "Welcome! Check-in guide: door code 1234. Enjoy your stay!!"},
     {"id": 10, "bookingId": 100, "source": "host", "time": iso(10), "message": "Welcome! Check-in guide: door code 5678. Enjoy your stay!!"},
+    {"id": 11, "bookingId": 300, "source": "guest", "time": iso(1), "message": "Is there parking nearby?"},
 ]
 
 
@@ -90,7 +94,7 @@ class ClientTest(unittest.TestCase):
         api = FakeBeds24(properties=PROPERTIES * 3, page_size=2, fail_first={"/properties": 429})
         c = client_for(api)
         c.authenticate()
-        self.assertEqual(len(c.properties()), 6)
+        self.assertEqual(len(c.properties()), len(PROPERTIES) * 3)
         self.assertIn(("sleep", 4, None), api.calls)  # x-five-min-limit-resets-in + 1
 
     def test_low_credit_waits_for_reset(self):
@@ -154,6 +158,15 @@ class PipelineTest(unittest.TestCase):
         with open(key_file, encoding="utf-8") as f:
             self.assertEqual(f.read(), REFRESH + "-2")
 
+    def test_group_keyword_selects_property_and_units_label_rooms(self):
+        api = FakeBeds24(PROPERTIES, BOOKINGS, MESSAGES)
+        args = fetch_messages.build_parser().parse_args(["--group", "テスト合同会社", "--out", self.out])
+        self.assertEqual(fetch_messages.run(args, client_for(api)), 0)
+        with open(os.path.join(self.out, "raw", "messages.json"), encoding="utf-8") as f:
+            self.assertEqual([m["id"] for m in json.load(f)], [11])
+        with open(os.path.join(self.out, "threads.md"), encoding="utf-8") as f:
+            self.assertIn("## Unit House / 1ベッドルーム / 502 | 予約 #300", f.read())
+
     def test_room_name_selection_limits_rooms(self):
         api = FakeBeds24(PROPERTIES, BOOKINGS, MESSAGES)
         args = fetch_messages.build_parser().parse_args(["--name-contains", "301", "--out", self.out])
@@ -170,7 +183,9 @@ class PipelineTest(unittest.TestCase):
             w.writerow(["201 Sample House", "b01", "サンプル管理", "1階で預かり可", "1階で預かり可", "ハウスマニュアル参照", ""])
             w.writerow(["301 Sample House", "b02", "サンプル管理", "1階で預かり可", "1階で預かり可", "ハウスマニュアル参照", ""])
             w.writerow(["Other", "x01", "他社", "", "", "", ""])
-        self.assertEqual(build_review.main(["--data", self.out, "--sheet", sheet, "--company", "サンプル管理"]), 0)
+            w.writerow(["301 Unit House", "u01", "サンプル管理", "", "", "", ""])  # 別施設の同じ部屋番号に紛れないこと
+        self.assertEqual(build_review.main(["--data", self.out, "--sheet", sheet, "--company", "サンプル管理",
+                                            "--template-min-count", "2"]), 0)
         with open(os.path.join(self.out, "review.md"), encoding="utf-8") as f:
             review = f.read()
         self.assertIn("### 荷物預け（IN前・OUT後）（1件）", review)
@@ -179,8 +194,16 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("**A**（", review)
         self.assertIn("）: Yes, there is a luggage area on 1F.", review)
         self.assertIn("）: オーナー確認済み", review)
-        self.assertIn("**シートの記載「荷物預チェックイン前」「荷物預チェックアウト後」（全室共通）**", review)
-        self.assertIn("#### 2回送信", review)
+        self.assertIn("**シートの記載「荷物預チェックイン前」「荷物預チェックアウト後」（b01, b02）**", review)
+        self.assertIn("自動送信・テンプレート 1 種類", review)
+        self.assertIn("）: [定型文T1]", review)  # 定型文は本文ではなく番号で示す
+        with open(os.path.join(self.out, "templates.md"), encoding="utf-8") as f:
+            templates = f.read()
+        self.assertIn("## T1（2回: Sample House 2）", templates)
+        with open(os.path.join(self.out, "conversations_Sample_House.md"), encoding="utf-8") as f:
+            conversation = f.read()
+        self.assertIn("H: [T1]", conversation)
+        self.assertIn("G: Can we leave our luggage before check-in?", conversation)
         self.assertIn("全室で空欄の列: 鍵", review)
         with open(os.path.join(self.out, "qa_pairs.csv"), encoding="utf-8-sig") as f:
             rows = list(csv.DictReader(f))

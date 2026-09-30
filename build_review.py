@@ -5,8 +5,10 @@
   python3 build_review.py --data out/sample --sheet 施設情報.csv --company サンプル管理
 
 出力（--data 配下）:
-  review.md     項目別に「シートの記載」と「ゲストの質問＋スタッフの回答」を並べた資料
-  qa_pairs.csv  質問1件ごとの一覧（項目・部屋・質問・回答）
+  review.md              項目別に「シートの記載」と「ゲストの質問＋スタッフの回答」を並べた資料
+  qa_pairs.csv           質問1件ごとの一覧（項目・部屋・質問・回答）
+  templates.md           ホストの定型文（自動送信など）の一覧。T番号つき
+  conversations_*.md     施設ごとの会話ログ（定型文は T番号で省略。通読用）
 """
 import argparse
 import csv
@@ -17,6 +19,7 @@ from collections import OrderedDict
 
 from beds24_tools.dataset import build_threads, fmt_jst, guess_lang, load_dataset, parse_time
 from beds24_tools.topics import TOPICS, classify
+from beds24_tools.transcripts import find_templates, plain, write_conversations_md, write_templates_md
 
 Q_LIMIT, A_LIMIT, SHEET_LIMIT = 600, 900, 1500
 
@@ -28,19 +31,25 @@ def main(argv=None):
     ap.add_argument("--sheet", help="施設情報シートの CSV（1行目が列名）")
     ap.add_argument("--company", help="シートの「管理会社」列でこの値の行だけを使う")
     ap.add_argument("--title", help="資料のタイトル")
+    ap.add_argument("--template-min-count", type=int, default=3, help="この回数以上送られた文面を定型文とみなす（既定: 3）")
     args = ap.parse_args(argv)
 
     properties, bookings, messages = load_dataset(args.data)
     threads = build_threads(properties, bookings, messages)
     header, sheet_rows = load_sheet(args.sheet, args.company) if args.sheet else ([], [])
-    pairs = extract_pairs(threads, sheet_rows)
+    templates = find_templates(threads, args.template_min_count)
+    template_of = {id(m): n for n, sent in templates for _t, m in sent}
+    pairs = extract_pairs(threads, sheet_rows, template_of)
 
     title = args.title or f"施設情報レビュー資料{'：' + args.company if args.company else ''}"
-    md = render(title, threads, pairs, header, sheet_rows)
+    md = render(title, threads, pairs, header, sheet_rows, len(templates))
     with open(os.path.join(args.data, "review.md"), "w", encoding="utf-8") as f:
         f.write(md)
     write_pairs_csv(os.path.join(args.data, "qa_pairs.csv"), pairs)
-    print(f"{args.data}/review.md と qa_pairs.csv を作成しました（ゲストの質問 {len(pairs)} 件）", file=sys.stderr)
+    write_templates_md(os.path.join(args.data, "templates.md"), templates)
+    conversations = write_conversations_md(args.data, threads, templates)
+    print(f"{args.data} に review.md・qa_pairs.csv・templates.md・{'、'.join(conversations) or '会話ログなし'} を作成しました"
+          f"（ゲストの質問 {len(pairs)} 件、定型文 {len(templates)} 種類）", file=sys.stderr)
     return 0
 
 
@@ -61,14 +70,18 @@ def room_numbers(text):
 
 
 def match_sheet_row(room_label, sheet_rows):
-    """Beds24 の施設名/部屋名に含まれる部屋番号でシートの行を探す。1行しか無ければその行。"""
-    if len(sheet_rows) == 1:
-        return sheet_rows[0]
+    """シートの行のうち施設名が同じもの（部屋番号を除いて比較）から、部屋番号が一致する行を返す。"""
+    prop = _name_key(room_label.split(" / ")[0])
+    same = [r for r in sheet_rows if prop and _name_key(r.get("施設名")) and
+            (prop in _name_key(r.get("施設名")) or _name_key(r.get("施設名")) in prop)]
+    if len(same) == 1:
+        return same[0]
     nums = set(room_numbers(room_label))
-    for r in sheet_rows:
-        if nums & set(room_numbers(r.get("施設名", ""))):
-            return r
-    return None
+    return next((r for r in same if nums & set(room_numbers(r.get("施設名", "")))), None)
+
+
+def _name_key(name):
+    return re.sub(r"[\d\s　]+", "", name or "").lower()
 
 
 def sheet_value_summary(sheet_rows, column):
@@ -83,8 +96,10 @@ def sheet_value_summary(sheet_rows, column):
 
 # ---- 質問と回答の抽出 ----
 
-def extract_pairs(threads, sheet_rows):
-    """ゲストのメッセージ1件ごとに、次のゲスト発言までのホスト回答・内部メモを「回答」として組にする。"""
+def extract_pairs(threads, sheet_rows, template_of=None):
+    """ゲストのメッセージ1件ごとに、次のゲスト発言までのホスト回答・内部メモを「回答」として組にする。
+    template_of（id(メッセージ) → T番号）に含まれる定型文は本文の代わりに [定型文Tn] と書く。"""
+    template_of = template_of or {}
     pairs = []
     for t in threads:
         msgs = t["messages"]
@@ -97,8 +112,8 @@ def extract_pairs(threads, sheet_rows):
                 if n.get("source") == "guest":
                     break
                 if n.get("source") in ("host", "internalNote"):
-                    answers.append((n.get("source"), (n.get("message") or "").strip(),
-                                    fmt_jst(parse_time(n.get("time")))[5:]))
+                    text = f"[定型文T{template_of[id(n)]}]" if id(n) in template_of else plain(n.get("message"))
+                    answers.append((n.get("source"), text, fmt_jst(parse_time(n.get("time")))[5:]))
             text = (m.get("message") or "").strip()
             pairs.append({
                 "time": fmt_jst(parse_time(m.get("time"))),
@@ -117,7 +132,7 @@ def extract_pairs(threads, sheet_rows):
 
 # ---- 出力 ----
 
-def render(title, threads, pairs, header, sheet_rows):
+def render(title, threads, pairs, header, sheet_rows, template_count=0):
     by_topic = OrderedDict((label, []) for label, _c, _p in TOPICS)
     unmatched = []
     for p in pairs:
@@ -181,13 +196,9 @@ def render(title, threads, pairs, header, sheet_rows):
               "挨拶・お礼が中心ですが、シートに無い質問が混ざっていないか確認してください。", ""]
     lines += render_pairs(unmatched)
 
-    lines += ["## 5. ホストが繰り返し送っている定型メッセージ", "",
-              "自動送信・テンプレートの本文です。シートに無い施設情報（入室方法・Wi-Fi など）の出典として確認してください。", ""]
-    for text, count in repeated_host_messages(threads):
-        lines.append(f"#### {count}回送信")
-        lines.append("")
-        lines.append(quote(text, 4000))
-        lines.append("")
+    lines += ["## 5. ホストの定型文", "",
+              f"自動送信・テンプレート {template_count} 種類の本文は templates.md にあります（回答欄の [定型文Tn] と対応）。"
+              "シートに無い施設情報（入室方法・Wi-Fi など）の出典として確認してください。", ""]
     return "\n".join(lines)
 
 
@@ -204,22 +215,6 @@ def render_pairs(items):
             lines.append("    - **A**: （この後にホストの返信なし）")
     lines.append("")
     return lines
-
-
-def repeated_host_messages(threads, min_count=2):
-    """先頭の文面が同じホスト/システム送信をまとめ、回数の多い順に (最新の本文, 回数) を返す。"""
-    groups = {}
-    for t in threads:
-        for m in t["messages"]:
-            if m.get("source") not in ("host", "system"):
-                continue
-            text = (m.get("message") or "").strip()
-            key = re.sub(r"[\d\s]+", "", text)[:60]
-            if len(key) < 20:
-                continue
-            count, _latest = groups.get(key, (0, ""))
-            groups[key] = (count + 1, text)
-    return sorted(((text, count) for count, text in groups.values() if count >= min_count), key=lambda x: -x[1])
 
 
 def sheet_status(sheet_rows, cols):

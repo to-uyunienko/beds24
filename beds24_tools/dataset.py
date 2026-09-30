@@ -70,9 +70,11 @@ def room_index(properties):
 
 
 def room_label(properties_by_id, rooms_by_id, booking):
+    """「施設名 / 部屋名 / 部屋番号（ユニット名）」。同じ部屋タイプに複数室ある場合はユニット名で区別する。"""
     prop = properties_by_id.get(booking.get("propertyId")) or {}
     room = (rooms_by_id.get(booking.get("roomId")) or (None, {}))[1]
-    names = [n for n in (prop.get("name"), room.get("name")) if n]
+    unit = next((u for u in room.get("units") or [] if u.get("id") == booking.get("unitId")), {})
+    names = [n for n in (prop.get("name"), room.get("name"), unit.get("name")) if n]
     return " / ".join(names) or f"property {booking.get('propertyId')} room {booking.get('roomId')}"
 
 

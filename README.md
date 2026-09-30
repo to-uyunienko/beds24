@@ -38,14 +38,17 @@ python3 fetch_messages.py --key-file ~/beds24_token.txt --list-properties
 python3 fetch_messages.py --list-properties
 ```
 
-### 3. メッセージを取得する（例: 施設名に「Sample House」を含む施設、過去30日）
+### 3. メッセージを取得する（例: グループ「サンプル合同会社」の施設、過去30日）
 
 ```bash
-python3 fetch_messages.py --name-contains "Sample House" --days 30 --out out/sample
+python3 fetch_messages.py --group "サンプル合同会社" --days 30 --out out/sample
 ```
 
-- `--name-contains` は施設名・部屋名の部分一致（複数指定可）。`--property-id` / `--room-id` で ID 指定もできます。
+- `--group` は Beds24 の施設設定のグループキーワード（`--list-properties` の [グループ: …] に表示）。
+  `--name-contains`（施設名・部屋名の部分一致）、`--property-id` / `--room-id`（ID 指定）でも絞り込めます。
   何も指定しなければアカウント内の全施設が対象です。
+- リンクされた（別アカウントの）施設を読むには、キー作成時に「Allow linked properties」へのチェックが必要です。
+- 同じ部屋タイプに複数室ある場合は、予約の部屋番号（ユニット名）まで表示します。
 - `--since 2026-08-30 --until 2026-09-30` で期間を日付指定できます。
 - 期間内のメッセージは「期間開始の30日前以降に退室した予約」から集めます（`--departure-buffer-days` で変更可）。
   それより古い予約への連絡も拾いたい場合は `--scan-max-age` を付けます。
@@ -69,8 +72,10 @@ python3 build_review.py --data out/sample --sheet 施設情報.csv --company サ
 
 | ファイル | 内容 |
 |---|---|
-| `review.md` | 項目別の質問件数、シートの空欄・⚠️セル、項目ごとの「シートの記載」と「Q&A」、定型メッセージ |
+| `review.md` | 項目別の質問件数、シートの空欄・⚠️セル、項目ごとの「シートの記載」と「Q&A」 |
 | `qa_pairs.csv` | ゲストの質問1件ごとの一覧（項目・部屋・シートID・質問・回答） |
+| `templates.md` | ホストが何度も送っている定型文（自動送信など）。チェックイン案内などの出典になります |
+| `conversations_施設名.md` | 施設ごとの会話ログ。定型文は `[T番号]` に置き換えてあるので通読しやすい |
 
 質問の項目分けは `beds24_tools/topics.py` のキーワード辞書（日本語・英語・中国語・韓国語）による一次仕分けです。
 シートの列と対応しない質問は「列なし」として出るので、新しい列や FAQ の候補になります。

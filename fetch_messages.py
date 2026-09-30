@@ -4,7 +4,7 @@
 使い方（詳しくは README.md）:
   export BEDS24_TOKEN='（APIキー）'          # または --key-file ファイルパス
   python3 fetch_messages.py --list-properties
-  python3 fetch_messages.py --name-contains "Sample House" --days 30 --out out/sample
+  python3 fetch_messages.py --group "サンプル合同会社" --days 30 --out out/sample
 
 出力（--out 配下。公開リポジトリにはコミットしないこと）:
   threads.md      予約ごとの会話ログ（読む用）
@@ -27,6 +27,7 @@ def build_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--key-file", help="APIキーを書いたファイル（未指定なら ./.beds24_token、次に環境変数 BEDS24_TOKEN）")
     ap.add_argument("--list-properties", action="store_true", help="施設・部屋の一覧を表示して終了")
+    ap.add_argument("--group", nargs="*", default=[], help="Beds24 のグループキーワード（施設設定の groupKeywords。複数可、OR）")
     ap.add_argument("--name-contains", nargs="*", default=[], help="施設名または部屋名に含まれる文字列（複数可、OR）")
     ap.add_argument("--property-id", nargs="*", type=int, default=[], help="対象の施設ID（複数可）")
     ap.add_argument("--room-id", nargs="*", type=int, default=[], help="対象の部屋ID（複数可）")
@@ -72,7 +73,7 @@ def run(args, client):
 
 
 def fetch(client, properties, args):
-    selection = select_rooms(properties, args.name_contains, args.property_id, args.room_id)
+    selection = select_rooms(properties, args.name_contains, args.property_id, args.room_id, args.group)
     if not selection:
         print("条件に合う施設・部屋がありません。--list-properties で名前とIDを確認してください。", file=sys.stderr)
         return 1
@@ -134,15 +135,16 @@ def fetch(client, properties, args):
     return 0
 
 
-def select_rooms(properties, name_contains, property_ids, room_ids):
+def select_rooms(properties, name_contains, property_ids, room_ids, groups=()):
     """{施設ID: 部屋IDの集合（None なら全部屋）} を返す。条件が無ければ全施設。"""
-    if not (name_contains or property_ids or room_ids):
+    if not (name_contains or property_ids or room_ids or groups):
         return {p.get("id"): None for p in properties}
     words = [w.lower() for w in name_contains]
     selection = {}
     for p in properties:
         pid = p.get("id")
-        if pid in property_ids or any(w in (p.get("name") or "").lower() for w in words):
+        in_group = bool(set(groups) & set(p.get("groupKeywords") or []))
+        if in_group or pid in property_ids or any(w in (p.get("name") or "").lower() for w in words):
             selection[pid] = None
             continue
         rooms = {r.get("id") for r in rooms_of(p)
@@ -162,9 +164,11 @@ def in_selection(selection, booking):
 
 def print_properties(properties):
     for p in properties:
-        print(f"施設 {p.get('id')}: {p.get('name')}")
+        groups = "、".join(p.get("groupKeywords") or [])
+        print(f"施設 {p.get('id')}: {p.get('name')}{'  [グループ: ' + groups + ']' if groups else ''}")
         for r in rooms_of(p):
-            print(f"    部屋 {r.get('id')}: {r.get('name')}（{r.get('qty', '?')}室）")
+            units = "、".join(u.get("name") or str(u.get("id")) for u in r.get("units") or [])
+            print(f"    部屋 {r.get('id')}: {r.get('name')}（{r.get('qty', '?')}室{': ' + units if units else ''}）")
 
 
 DEFAULT_KEY_FILE = ".beds24_token"
