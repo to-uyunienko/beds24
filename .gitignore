@@ -1,0 +1,11 @@
+# このリポジトリは公開リポジトリです。APIキー・ゲストのメッセージ・施設情報CSVは絶対にコミットしないこと。
+.beds24_token
+*.token
+.env
+out/
+data/
+*.csv
+*.xlsx
+
+__pycache__/
+*.pyc
