@@ -54,7 +54,7 @@ class Beds24Client:
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", "replace")
                 if (e.code == 429 or e.code >= 500) and attempt < self.max_retries:
-                    wait = _int_header(e.headers, "x-five-min-limit-resets-in") or min(60, 5 * 2 ** attempt)
+                    wait = _num_header(e.headers, "x-five-min-limit-resets-in") or min(60, 5 * 2 ** attempt)
                     self.log(f"HTTP {e.code} {path}: {wait}秒待って再試行します")
                     self.sleep(wait + 1)
                     continue
@@ -68,10 +68,10 @@ class Beds24Client:
 
     def _respect_credit_limit(self, headers):
         """5分間のクレジット残量が少なくなったらリセットまで待つ。"""
-        remaining = _int_header(headers, "x-five-min-limit-remaining")
-        cost = _int_header(headers, "x-request-cost") or 1
+        remaining = _num_header(headers, "x-five-min-limit-remaining")
+        cost = _num_header(headers, "x-request-cost") or 1
         if remaining is not None and remaining <= max(5, cost * 2):
-            wait = _int_header(headers, "x-five-min-limit-resets-in") or 60
+            wait = _num_header(headers, "x-five-min-limit-resets-in") or 60
             self.log(f"APIクレジット残り {remaining}: {wait}秒待機します")
             self.sleep(wait + 1)
 
@@ -169,9 +169,10 @@ def _parse_json(body):
         return body
 
 
-def _int_header(headers, name):
+def _num_header(headers, name):
+    """数値ヘッダーを float で返す（Beds24 は "97.8" のような小数を返す）。"""
     try:
-        return int(headers.get(name)) if headers and headers.get(name) is not None else None
+        return float(headers.get(name)) if headers and headers.get(name) is not None else None
     except (TypeError, ValueError):
         return None
 

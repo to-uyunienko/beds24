@@ -80,8 +80,9 @@ class FakeBeds24:
         page = int(query.get("page", ["1"])[0])
         chunk = items[(page - 1) * self.page_size: page * self.page_size]
         more = page * self.page_size < len(items)
-        headers_out = {"x-five-min-limit-remaining": "3" if self.low_credit else "500",
-                       "x-five-min-limit-resets-in": "7", "x-request-cost": "1"}
+        # 本物と同じく小数で返す
+        headers_out = {"x-five-min-limit-remaining": "3.2" if self.low_credit else "97.8",
+                       "x-five-min-limit-resets-in": "7", "x-request-cost": "1.1"}
         return FakeResponse(200, {"success": True, "count": len(chunk), "data": chunk,
                                   "pages": {"nextPageExists": more, "nextPageLink": None}}, headers_out)
 
