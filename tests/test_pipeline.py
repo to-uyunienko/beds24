@@ -10,7 +10,7 @@ import fetch_messages
 from beds24_tools.client import Beds24Client, Beds24Error
 from beds24_tools.dataset import JST
 from beds24_tools.topics import classify
-from tests.fake_api import LONG_LIFE, REFRESH, FakeBeds24
+from tests.fake_api import INVITE, LONG_LIFE, REFRESH, FakeBeds24
 
 
 def iso(days_ago, hour=12):
@@ -49,8 +49,9 @@ MESSAGES = [
 ]
 
 
-def client_for(api, key=LONG_LIFE):
-    return Beds24Client(key, urlopen=api, sleep=lambda s: api.calls.append(("sleep", s, None)))
+def client_for(api, key=LONG_LIFE, saved=None):
+    return Beds24Client(key, urlopen=api, sleep=lambda s: api.calls.append(("sleep", s, None)),
+                        on_new_refresh_token=(saved.append if saved is not None else None))
 
 
 class ClientTest(unittest.TestCase):
@@ -61,15 +62,29 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(c.token, LONG_LIFE)
         self.assertEqual(c.scopes(), ["read:bookings"])
 
-    def test_refresh_token_is_exchanged(self):
-        api = FakeBeds24()
-        c = client_for(api, REFRESH)
+    def test_refresh_token_is_exchanged_and_the_new_one_is_handed_over(self):
+        api, saved = FakeBeds24(), []
+        c = client_for(api, REFRESH, saved)
         self.assertEqual(c.authenticate(), "refresh")
-        self.assertNotEqual(c.token, REFRESH)
+        self.assertEqual(saved, [REFRESH + "-1"])
+        self.assertEqual(client_for(api, saved[0], saved).authenticate(), "refresh")
+        with self.assertRaises(Beds24Error):  # 使用済みの元のキーはもう使えない
+            client_for(api, REFRESH, saved).authenticate()
+
+    def test_refresh_token_is_not_used_without_a_place_to_save_the_new_one(self):
+        api = FakeBeds24()
+        with self.assertRaises(Beds24Error):
+            client_for(api, REFRESH).authenticate()
+        self.assertEqual(api.refresh_tokens, {REFRESH})
+
+    def test_invite_code_is_exchanged(self):
+        saved = []
+        self.assertEqual(client_for(FakeBeds24(), INVITE, saved).authenticate(), "invite")
+        self.assertEqual(len(saved), 1)
 
     def test_bad_key_raises(self):
         with self.assertRaises(Beds24Error):
-            client_for(FakeBeds24(), "wrong").authenticate()
+            client_for(FakeBeds24(), "wrong", []).authenticate()
 
     def test_pages_are_followed_and_429_is_retried(self):
         api = FakeBeds24(properties=PROPERTIES * 3, page_size=2, fail_first={"/properties": 429})
@@ -125,6 +140,19 @@ class PipelineTest(unittest.TestCase):
         self.assertIn(102, [b["id"] for b in bookings])
         max_age = next(q for p, q, _h in api.calls if p == "/bookings/messages" and "maxAge" in q)["maxAge"][0]
         self.assertGreater(int(max_age), 30 * 86400 - 1)
+
+    def test_key_file_is_rewritten_so_the_next_run_still_works(self):
+        api = FakeBeds24(PROPERTIES, BOOKINGS, MESSAGES)
+        key_file = os.path.join(self.tmp.name, "key.txt")
+        with open(key_file, "w", encoding="utf-8") as f:
+            f.write(REFRESH)
+        argv = ["--key-file", key_file, "--name-contains", "sample", "--out", self.out]
+        self.assertEqual(fetch_messages.main(argv, urlopen=api), 0)
+        with open(key_file, encoding="utf-8") as f:
+            self.assertEqual(f.read(), REFRESH + "-1")
+        self.assertEqual(fetch_messages.main(argv, urlopen=api), 0)
+        with open(key_file, encoding="utf-8") as f:
+            self.assertEqual(f.read(), REFRESH + "-2")
 
     def test_room_name_selection_limits_rooms(self):
         api = FakeBeds24(PROPERTIES, BOOKINGS, MESSAGES)

@@ -6,6 +6,7 @@ import urllib.parse
 
 LONG_LIFE = "long-life-token"
 REFRESH = "refresh-token"
+INVITE = "invite-code"
 ACCESS = "access-token"
 
 
@@ -36,6 +37,10 @@ class FakeBeds24:
         self.fail_first = dict(fail_first or {})  # {path: HTTPステータス} 最初の1回だけ失敗させる
         self.low_credit = low_credit
         self.calls = []
+        # 本物と同じく、リフレッシュトークン・招待コードは1回使うと無効になり、新しいリフレッシュトークンが発行される
+        self.refresh_tokens = {REFRESH}
+        self.invites = {INVITE}
+        self.issued = 0
 
     def __call__(self, req, timeout=None):
         parsed = urllib.parse.urlparse(req.full_url)
@@ -50,10 +55,17 @@ class FakeBeds24:
         if path == "/authentication/details":
             valid = headers.get("token") in (LONG_LIFE, ACCESS)
             return FakeResponse(200, {"validToken": valid, "token": {"scopes": ["read:bookings"]} if valid else {}})
-        if path == "/authentication/token":
-            if headers.get("refreshtoken") == REFRESH:
-                return FakeResponse(200, {"token": ACCESS, "expiresIn": 86400})
-            raise urllib.error.HTTPError(req.full_url, 401, "unauthorized", {}, io.BytesIO(b'{"success": false}'))
+        if path in ("/authentication/token", "/authentication/setup"):
+            pool, key = ((self.refresh_tokens, headers.get("refreshtoken")) if path == "/authentication/token"
+                         else (self.invites, headers.get("code")))
+            if key in pool:
+                pool.discard(key)
+                self.issued += 1
+                new_refresh = f"{REFRESH}-{self.issued}"
+                self.refresh_tokens.add(new_refresh)
+                return FakeResponse(200, {"token": ACCESS, "expiresIn": 86400, "refreshToken": new_refresh})
+            raise urllib.error.HTTPError(req.full_url, 401, "unauthorized", {},
+                                         io.BytesIO(b'{"success": false, "code": 401, "error": "Token not valid"}'))
         if headers.get("token") not in (LONG_LIFE, ACCESS):
             raise urllib.error.HTTPError(req.full_url, 401, "unauthorized", {}, io.BytesIO(b'{"success": false}'))
         if path == "/properties":

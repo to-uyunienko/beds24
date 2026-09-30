@@ -15,6 +15,7 @@
 import argparse
 import os
 import sys
+import urllib.request
 from datetime import datetime, time, timedelta
 
 from beds24_tools.client import ALL_BOOKING_STATUSES, Beds24Client, Beds24Error
@@ -24,7 +25,7 @@ from beds24_tools.dataset import (JST, build_threads, parse_time, rooms_of, save
 
 def build_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--key-file", help="APIキーを書いたファイル（未指定なら環境変数 BEDS24_TOKEN、次に ./.beds24_token）")
+    ap.add_argument("--key-file", help="APIキーを書いたファイル（未指定なら ./.beds24_token、次に環境変数 BEDS24_TOKEN）")
     ap.add_argument("--list-properties", action="store_true", help="施設・部屋の一覧を表示して終了")
     ap.add_argument("--name-contains", nargs="*", default=[], help="施設名または部屋名に含まれる文字列（複数可、OR）")
     ap.add_argument("--property-id", nargs="*", type=int, default=[], help="対象の施設ID（複数可）")
@@ -40,22 +41,26 @@ def build_parser():
     return ap
 
 
-def main(argv=None):
+def main(argv=None, urlopen=urllib.request.urlopen):
     for stream in (sys.stdout, sys.stderr):  # Windows のコンソールで絵文字入りの名前が出ても落ちないように
         stream.reconfigure(errors="replace")
     ap = build_parser()
     args = ap.parse_args(argv)
     if not args.list_properties and not args.out:
         ap.error("--out を指定してください")
-    client = Beds24Client(load_key(args.key_file), log=lambda msg: print(msg, file=sys.stderr))
+    key, key_path = load_key(args.key_file)
+    client = Beds24Client(key, urlopen=urlopen, log=lambda msg: print(msg, file=sys.stderr),
+                          on_new_refresh_token=key_saver(key_path))
     return run(args, client)
+
+
+KEY_KINDS = {"token": "長期トークン", "refresh": "リフレッシュトークン", "invite": "招待コード"}
 
 
 def run(args, client):
     try:
         kind = client.authenticate()
-        print(f"認証OK（{'長期トークン' if kind == 'token' else 'リフレッシュトークン'}）"
-              f" scopes: {', '.join(client.scopes()) or '不明'}", file=sys.stderr)
+        print(f"認証OK（{KEY_KINDS[kind]}） scopes: {', '.join(client.scopes()) or '不明'}", file=sys.stderr)
         properties = client.properties()
         if args.list_properties:
             print_properties(properties)
@@ -162,16 +167,43 @@ def print_properties(properties):
             print(f"    部屋 {r.get('id')}: {r.get('name')}（{r.get('qty', '?')}室）")
 
 
+DEFAULT_KEY_FILE = ".beds24_token"
+
+
 def load_key(key_file):
-    if key_file:
-        with open(key_file, encoding="utf-8") as f:
-            return f.read().strip()
+    """(キー, 読み込んだファイル) を返す。環境変数から読んだ場合ファイルは None。"""
+    path = key_file or (DEFAULT_KEY_FILE if os.path.exists(DEFAULT_KEY_FILE) else None)
+    if path:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip(), path
     if os.environ.get("BEDS24_TOKEN"):
-        return os.environ["BEDS24_TOKEN"].strip()
-    if os.path.exists(".beds24_token"):
-        with open(".beds24_token", encoding="utf-8") as f:
-            return f.read().strip()
-    sys.exit("APIキーがありません。環境変数 BEDS24_TOKEN、--key-file、または ./.beds24_token で指定してください。")
+        return os.environ["BEDS24_TOKEN"].strip(), None
+    sys.exit("APIキーがありません。--key-file、./.beds24_token、または環境変数 BEDS24_TOKEN で指定してください。")
+
+
+def key_saver(key_path):
+    """Beds24 が発行し直したリフレッシュトークンをキーファイルに上書き保存する関数を返す。"""
+    def save(token):
+        dest = key_path or DEFAULT_KEY_FILE
+        try:
+            write_secret(dest, token)
+        except OSError as e:
+            print(f"新しいキーを {dest} に保存できませんでした（{e}）。元のキーはもう使えないため、"
+                  f"次の値を安全な場所に保存してください:\n{token}", file=sys.stderr)
+            return
+        print(f"Beds24 が新しいキーを発行したため {dest} を更新しました（元のキーは無効になりました）", file=sys.stderr)
+        if key_path is None:
+            print("環境変数 BEDS24_TOKEN の値はもう使えないので削除してください（次回から ./.beds24_token を使います）",
+                  file=sys.stderr)
+    return save
+
+
+def write_secret(path, text):
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
 
 
 if __name__ == "__main__":

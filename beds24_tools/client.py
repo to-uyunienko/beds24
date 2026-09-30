@@ -1,7 +1,10 @@
 """Beds24 API V2 の読み取り専用クライアント（Python 標準ライブラリのみ）。
 
-キーは「長期トークン（読み取り専用）」と「リフレッシュトークン」のどちらでも受け付ける。
-まずそのまま token ヘッダーで試し、無効ならリフレッシュトークンとして短期トークンに交換する。
+キーは「長期トークン（読み取り専用）」「リフレッシュトークン」「招待コード」のどれでも受け付ける。
+まずそのまま token ヘッダーで試し、無効ならリフレッシュトークン、次に招待コードとして短期トークンに交換する。
+
+注意: Beds24 はリフレッシュトークンを交換するたびに新しいリフレッシュトークンを発行し、古いものを無効にする。
+新しいトークンは on_new_refresh_token に渡すので、呼び出し側で必ず保存すること（失うとキーを作り直すしかない）。
 """
 import json
 import time
@@ -21,8 +24,9 @@ class Beds24Error(Exception):
 
 class Beds24Client:
     def __init__(self, key, base=API_BASE, urlopen=urllib.request.urlopen,
-                 sleep=time.sleep, log=None, max_retries=5):
+                 sleep=time.sleep, log=None, max_retries=5, on_new_refresh_token=None):
         self.key = key.strip()
+        self.on_new_refresh_token = on_new_refresh_token
         self.base = base.rstrip("/")
         self.urlopen = urlopen
         self.sleep = sleep
@@ -74,17 +78,26 @@ class Beds24Client:
     # ---- 認証 ----
 
     def authenticate(self):
-        """キーの種類を判定して利用可能な token をセットし、種類（"token"/"refresh"）を返す。"""
+        """キーの種類を判定して利用可能な token をセットし、種類（"token"/"refresh"/"invite"）を返す。"""
         status, data = self._call("/authentication/details", headers={"token": self.key})
         if status == 200 and isinstance(data, dict) and data.get("validToken"):
             self.token, self.token_details = self.key, data
             return "token"
-        status, data = self._call("/authentication/token", headers={"refreshToken": self.key})
-        if status == 200 and isinstance(data, dict) and data.get("token"):
-            self.token = data["token"]
-            s2, d2 = self._call("/authentication/details", headers={"token": self.token})
-            self.token_details = d2 if s2 == 200 else None
-            return "refresh"
+        if self.on_new_refresh_token is None:
+            raise Beds24Error("長期トークンではありません。リフレッシュトークン・招待コードは交換すると新しいキーが発行され"
+                              "元のキーが無効になるため、保存先（on_new_refresh_token）を指定してください")
+        for kind, path, header in (("refresh", "/authentication/token", "refreshToken"),
+                                   ("invite", "/authentication/setup", "code")):
+            status, data = self._call(path, headers={header: self.key})
+            if status == 200 and isinstance(data, dict) and data.get("token"):
+                if data.get("refreshToken"):
+                    # 次の通信より前に保存する。古いキーはこの時点で無効になっている
+                    self.on_new_refresh_token(data["refreshToken"])
+                    self.key = data["refreshToken"]
+                self.token = data["token"]
+                s2, d2 = self._call("/authentication/details", headers={"token": self.token})
+                self.token_details = d2 if s2 == 200 else None
+                return kind
         raise Beds24Error(f"APIキーが受け付けられませんでした（HTTP {status}）: {_short(data)}")
 
     def scopes(self):
