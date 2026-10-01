@@ -18,7 +18,7 @@ import sys
 from collections import OrderedDict
 
 from beds24_tools.dataset import build_threads, fmt_jst, guess_lang, load_dataset, parse_time
-from beds24_tools.topics import TOPICS, classify
+from beds24_tools.topics import TOPICS, classify, resolve_columns
 from beds24_tools.transcripts import find_templates, plain, write_conversations_md, write_templates_md
 
 Q_LIMIT, A_LIMIT, SHEET_LIMIT = 600, 900, 1500
@@ -36,13 +36,14 @@ def main(argv=None):
 
     properties, bookings, messages = load_dataset(args.data)
     threads = build_threads(properties, bookings, messages)
-    header, sheet_rows = load_sheet(args.sheet, args.company) if args.sheet else ([], [])
+    header, all_rows, sheet_rows = load_sheet(args.sheet, args.company) if args.sheet else ([], [], [])
     templates = find_templates(threads, args.template_min_count)
     template_of = {id(m): n for n, sent in templates for _t, m in sent}
     pairs = extract_pairs(threads, sheet_rows, template_of)
+    missing = unregistered(threads, all_rows) if args.sheet else {}
 
     title = args.title or f"施設情報レビュー資料{'：' + args.company if args.company else ''}"
-    md = render(title, threads, pairs, header, sheet_rows, len(templates))
+    md = render(title, threads, pairs, header, sheet_rows, len(templates), missing)
     with open(os.path.join(args.data, "review.md"), "w", encoding="utf-8") as f:
         f.write(md)
     write_pairs_csv(os.path.join(args.data, "qa_pairs.csv"), pairs)
@@ -50,19 +51,45 @@ def main(argv=None):
     conversations = write_conversations_md(args.data, threads, templates)
     print(f"{args.data} に review.md・qa_pairs.csv・templates.md・{'、'.join(conversations) or '会話ログなし'} を作成しました"
           f"（ゲストの質問 {len(pairs)} 件、定型文 {len(templates)} 種類）", file=sys.stderr)
+    for name, count in missing.items():
+        print(f"シートに行がありません: {name}（{count} スレッド）", file=sys.stderr)
     return 0
 
 
 # ---- シート ----
 
 def load_sheet(path, company):
+    """(列名, 全行, 照合に使う行) を返す。company を指定すると照合に使う行を管理会社で絞る。"""
     with open(path, encoding="utf-8-sig", newline="") as f:
         rows = list(csv.reader(f))
     header = rows[0]
     records = [dict(zip(header, r)) for r in rows[1:] if any(c.strip() for c in r)]
-    if company:
-        records = [r for r in records if r.get("管理会社", "").strip() == company]
-    return header, records
+    selected = [r for r in records if r.get("管理会社", "").strip() == company] if company else records
+    return header, records, selected
+
+
+def unregistered(threads, all_rows):
+    """シートのどの行とも合わない施設・部屋を {表示名: スレッド数} で返す（新規施設・新しい部屋の発見用）。"""
+    missing = OrderedDict()
+    for t in threads:
+        prop = t["room"].split(" / ")[0]
+        rows = [r for r in all_rows if _same_property(prop, r)]
+        if not rows:
+            name = prop
+        else:
+            numbered = [r for r in rows if room_numbers(r.get("施設名"))]
+            nums = set(room_numbers(t["room"]))
+            if not numbered or not nums or any(nums & set(room_numbers(r.get("施設名"))) for r in numbered):
+                continue
+            name = f"{prop}（部屋 {'・'.join(sorted(nums))}）"
+        missing[name] = missing.get(name, 0) + 1
+    return missing
+
+
+def _same_property(prop, row):
+    key = _name_key(prop)
+    names = [_name_key(row.get(c)) for c in ("施設名", "Airbnb施設名", "Booking施設名")]
+    return bool(key) and any(len(n) >= 4 and (key in n or n in key) for n in names)
 
 
 def room_numbers(text):
@@ -132,7 +159,7 @@ def extract_pairs(threads, sheet_rows, template_of=None):
 
 # ---- 出力 ----
 
-def render(title, threads, pairs, header, sheet_rows, template_count=0):
+def render(title, threads, pairs, header, sheet_rows, template_count=0, missing=None):
     by_topic = OrderedDict((label, []) for label, _c, _p in TOPICS)
     unmatched = []
     for p in pairs:
@@ -151,8 +178,14 @@ def render(title, threads, pairs, header, sheet_rows, template_count=0):
         lines.append(f"- 照合したシートの行: {', '.join(r.get('ID', '') + ' ' + r.get('施設名', '') for r in sheet_rows)}")
     lines += ["", "項目の振り分けはキーワードによる一次仕分けです。1件が複数項目に入ることがあります。", ""]
 
+    if missing:
+        lines += ["## 0. シートに行がない施設・部屋", "", "新しい施設・部屋の可能性があります。新規行の作成を検討してください。", ""]
+        lines += [f"- {name}（{count} スレッド）" for name, count in missing.items()] + [""]
+
     lines += ["## 1. 項目別の質問件数", "", "| 項目 | シートの列 | 質問件数 | 予約数 | シートの記載 |", "|---|---|---|---|---|"]
-    ranked = sorted(((label, cols, by_topic[label]) for label, cols, _p in TOPICS if by_topic[label]),
+    # シートの版によって列名が違うので、手元のシートにある列名に読み替える
+    topic_cols = {label: (resolve_columns(cols, header) if header else cols) for label, cols, _p in TOPICS}
+    ranked = sorted(((label, topic_cols[label], by_topic[label]) for label, _c, _p in TOPICS if by_topic[label]),
                     key=lambda x: -len(x[2]))
     for label, cols, items in ranked:
         lines.append(f"| {label} | {' / '.join(cols) or '（列なし）'} | {len(items)} | "
@@ -166,7 +199,7 @@ def render(title, threads, pairs, header, sheet_rows, template_count=0):
         empty = [c for c in header if c not in skip and all(not r.get(c, "").strip() for r in sheet_rows)]
         flagged = [c for c in header if any("⚠" in r.get(c, "") for r in sheet_rows)]
         differs = [c for c in header if c not in skip and len({r.get(c, "").strip() for r in sheet_rows}) > 1]
-        asked = {c for label, cols, _p in TOPICS if by_topic[label] for c in cols}
+        asked = {c for label, _c, _p in TOPICS if by_topic[label] for c in topic_cols[label]}
         lines.append(f"- 全室で空欄の列: {', '.join(empty) or 'なし'}")
         lines.append(f"- うち、この期間に実際に質問があった列: {', '.join(c for c in empty if c in asked) or 'なし'}")
         lines.append(f"- 「⚠️」（オーナー確認など）を含む列: {', '.join(flagged) or 'なし'}")

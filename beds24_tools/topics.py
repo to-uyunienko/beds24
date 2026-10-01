@@ -238,7 +238,36 @@ TOPICS = [
         "騒音", "うるさ", "騒が", "苦情", "近所", "噪音", "吵", "邻居", "소음", "시끄", "이웃"]),
 ]
 
+# シートの版によって列名が違うときの別名（例: 旧版の施設早見表では「割引」が「値引き対応」）
+COLUMN_ALIASES = {
+    "スーバー/コンビニ": ["スーパー/コンビニ", "周辺情報"],
+    "レストラン": ["周辺情報"],
+    "温泉/銭湯": ["周辺情報"],
+    "コインランドリー": ["周辺情報"],
+    "薬局/病院": ["周辺情報"],
+    "コインロッカー": ["ロッカー"],
+    "ゴミ捨て方": ["短期ゴミ", "長期ゴミ"],
+    "清掃": ["長期滞在清掃"],
+    "設備使用方法": ["リモコン"],
+    "割引": ["値引き対応"],
+    "お漏らし、嘔吐": ["お漏らし"],
+    "不幸時返金（亡くなった、病気等）": ["不幸時返金"],
+    "花火,プール": ["花火", "プール"],
+}
+
 _COMPILED = [(label, cols, [re.compile(p, re.IGNORECASE) for p in pats]) for label, cols, pats in TOPICS]
+
+
+def resolve_columns(columns, header):
+    """項目の列名を、手元のシートに実際にある列名に読み替える（無ければ別名を探す）。"""
+    resolved = []
+    for col in columns:
+        for name in [col] + COLUMN_ALIASES.get(col, []):
+            if name in header and name not in resolved:
+                resolved.append(name)
+                if name == col:
+                    break
+    return resolved
 
 
 def classify(text):

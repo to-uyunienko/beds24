@@ -9,7 +9,7 @@ import build_review
 import fetch_messages
 from beds24_tools.client import Beds24Client, Beds24Error
 from beds24_tools.dataset import JST
-from beds24_tools.topics import classify
+from beds24_tools.topics import classify, resolve_columns
 from tests.fake_api import INVITE, LONG_LIFE, REFRESH, FakeBeds24
 
 
@@ -212,7 +212,45 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(wifi["シートID"], "b02")
 
 
+class UnregisteredTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out = os.path.join(self.tmp.name, "out")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def review_for(self, selection, sheet_rows):
+        api = FakeBeds24(PROPERTIES, BOOKINGS, MESSAGES)
+        args = fetch_messages.build_parser().parse_args(selection + ["--out", self.out])
+        self.assertEqual(fetch_messages.run(args, client_for(api)), 0)
+        sheet = os.path.join(self.tmp.name, "sheet.csv")
+        with open(sheet, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["施設名", "ID", "管理会社", "値引き対応"])
+            w.writerows(sheet_rows)
+        self.assertEqual(build_review.main(["--data", self.out, "--sheet", sheet]), 0)
+        with open(os.path.join(self.out, "review.md"), encoding="utf-8") as f:
+            return f.read()
+
+    def test_property_without_any_sheet_row_is_listed(self):
+        review = self.review_for(["--group", "テスト合同会社"], [["201 Sample House", "b01", "サンプル管理", ""]])
+        self.assertIn("## 0. シートに行がない施設・部屋", review)
+        self.assertIn("- Unit House（1 スレッド）", review)
+
+    def test_room_missing_from_a_registered_property_is_listed(self):
+        review = self.review_for(["--name-contains", "sample"], [["201 Sample House", "b01", "サンプル管理", ""]])
+        self.assertIn("- Sample House（部屋 301）（1 スレッド）", review)
+        self.assertNotIn("Sample House（部屋 201）", review)
+
+
 class TopicsTest(unittest.TestCase):
+    def test_columns_are_matched_to_other_sheet_versions(self):
+        self.assertEqual(resolve_columns(["割引"], ["施設名", "値引き対応"]), ["値引き対応"])
+        self.assertEqual(resolve_columns(["割引"], ["割引", "値引き対応"]), ["割引"])
+        self.assertEqual(resolve_columns(["スーバー/コンビニ", "レストラン"], ["周辺情報"]), ["周辺情報"])
+        self.assertEqual(resolve_columns(["チェックインガイド"], ["施設名"]), [])
+
     def test_multilingual_examples(self):
         cases = {
             "Could you tell me the door code?": "鍵・入室方法",
